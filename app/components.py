@@ -10,8 +10,7 @@ def copyable_block(label: str, text: str) -> None:
     """
     if label:
         st.caption(label)
-    st.code(text, language=None)
-
+    st.code(text, language=None, wrap_lines=True) 
 
 def subject_card(col, type_label: str, subject: str) -> None:
     """

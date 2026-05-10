@@ -32,27 +32,33 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-/* Reduce top padding in sidebar */
 section[data-testid="stSidebar"] > div:first-child {
     padding-top: 1.5rem;
 }
-/* Give code blocks a subtle border so they read as "output" containers */
+
+/* Remove the height cap so the full email body is visible */
+.stCode pre {
+    max-height: none !important;
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+    overflow: visible !important;
+}
+
 .stCode {
     border: 1px solid rgba(128, 128, 128, 0.18);
     border-radius: 6px;
 }
-/* Tighten space between caption and the element below it */
+
 .stCaption {
     margin-bottom: 2px !important;
 }
-/* Widen the generate button padding */
+
 .stButton > button[data-testid="baseButton-primary"] {
     padding-left: 2.5rem;
     padding-right: 2.5rem;
 }
 </style>
 """, unsafe_allow_html=True)
-
 
 # ── SESSION STATE INIT ───────────────────────────────────────────────────────
 # Initialize keys once. After this, Streamlit manages them across reruns.
@@ -210,7 +216,7 @@ if generate_btn:
 
     normalized_url = normalize_url(website_url)
 
-    with st.spinner("Researching prospect and generating email sequence… (10–20 seconds)"):
+    with st.spinner("Researching prospect and generating email sequence… (20–50 seconds)"):
         try:
             result = generate_email_package(
                 prospect_name=prospect_name.strip(),
@@ -302,7 +308,7 @@ if st.session_state["result"]:
         st.text_area(
             label="edit_email_label",
             value=result["email_body"],
-            height=250,
+            height=150,
             key="edited_email",
             label_visibility="collapsed",
         )
