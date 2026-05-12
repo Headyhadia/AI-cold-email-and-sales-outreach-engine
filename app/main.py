@@ -285,7 +285,7 @@ def render_main_app() -> None:
                 st.rerun()
 
     # ── MAIN AREA ─────────────────────────────────────────────────────────────
-    st.markdown("## Cold Email Engine")
+    st.markdown("## AI Cold Email & Sales Outreach Engine")
     st.caption("Paste a company URL — get a personalized cold email + follow-up sequence.")
     st.divider()
 
@@ -341,7 +341,7 @@ def render_main_app() -> None:
     if generate_btn:
         st.session_state["result"] = None
 
-        with st.spinner("Researching prospect and generating email sequence… (10–20 seconds)"):
+        with st.spinner("Researching prospect and generating email sequence… (20–30 seconds)"):
             try:
                 result = generate_email_package(
                     prospect_name=prospect_name.strip(),
