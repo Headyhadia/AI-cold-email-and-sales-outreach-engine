@@ -10,14 +10,17 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 import streamlit as st
+from streamlit_cookies_controller import CookieController
+
 from core.pipeline import generate_email_package
 from core.chain import generate_subjects
 from app.components import copyable_block, subject_card
 from utils.db import (
-    sign_up, sign_in, sign_out, restore_session,
+    sign_up, sign_in, sign_out,
+    restore_session, get_user_from_token,
     load_preferences, save_preferences,
     save_template, load_templates, delete_template,
-    is_at_limit, increment_usage,
+    get_today_count, increment_usage,
     FREE_TIER_LIMIT,
 )
 
@@ -32,19 +35,46 @@ st.set_page_config(
 )
 
 
+# ── COOKIE CONTROLLER ────────────────────────────────────────────────────────
+# Must be instantiated before any other st.* calls.
+# This renders the hidden cookie component into the page.
+
+_cookies = CookieController()
+
+
 # ── CSS ───────────────────────────────────────────────────────────────────────
 
 st.markdown("""
 <style>
-section[data-testid="stSidebar"] > div:first-child { padding-top: 1.5rem; }
+section[data-testid="stSidebar"] > div:first-child {
+    padding-top: 1.5rem;
+}
+
+/* Full email body — expand to full height */
 .stCode pre {
     max-height: none !important;
     white-space: pre-wrap !important;
     word-break: break-word !important;
     overflow: visible !important;
 }
-.stCode { border: 1px solid rgba(128,128,128,0.18); border-radius: 6px; }
-.stCaption { margin-bottom: 2px !important; }
+
+/* Sidebar subject line cards — prevent overflow */
+section[data-testid="stSidebar"] .stCode pre {
+    white-space: pre-wrap !important;
+    word-break: break-all !important;
+    overflow-wrap: break-word !important;
+    max-height: none !important;
+}
+
+.stCode {
+    border: 1px solid rgba(128,128,128,0.18);
+    border-radius: 6px;
+}
+
+.stCaption {
+    margin-bottom: 2px !important;
+}
+
 .stButton > button[data-testid="baseButton-primary"] {
     padding-left: 2.5rem;
     padding-right: 2.5rem;
@@ -54,7 +84,6 @@ section[data-testid="stSidebar"] > div:first-child { padding-top: 1.5rem; }
 
 
 # ── SESSION STATE INIT ────────────────────────────────────────────────────────
-# All keys initialized once. Widgets with matching keys read these as defaults.
 
 _defaults = {
     "user":          None,
@@ -64,6 +93,7 @@ _defaults = {
     "last_inputs":   {},
     "prefs_loaded":  False,
     "is_paid":       False,
+    "today_count":   0,           # cached — updated on login and after generation
     "templates":     [],
     "offer":         "",
     "tone":          "direct",
@@ -74,9 +104,36 @@ for _k, _v in _defaults.items():
         st.session_state[_k] = _v
 
 
-# ── RESTORE SESSION ───────────────────────────────────────────────────────────
-# On every rerun, re-attach the stored tokens to the Supabase client.
-# If this is skipped, RLS treats every DB call as anonymous and blocks it.
+# ── COOKIE-BASED SESSION RESTORATION ─────────────────────────────────────────
+# On every page load where the user isn't in session state yet,
+# check if valid auth cookies exist and restore the session from them.
+# This is what keeps the user logged in across browser refreshes.
+
+if st.session_state["user"] is None:
+    _at = _cookies.get("sce_at")
+    _rt = _cookies.get("sce_rt")
+
+    if _at and _rt:
+        try:
+            restore_session(_at, _rt)
+            _user_resp = get_user_from_token(_at)
+
+            if _user_resp and _user_resp.user:
+                st.session_state["user"]          = _user_resp.user
+                st.session_state["access_token"]  = _at
+                st.session_state["refresh_token"] = _rt
+                st.rerun()
+        except Exception:
+            # Tokens are expired or invalid — clear them so the user
+            # sees the login screen cleanly rather than a broken state
+            _cookies.remove("sce_at")
+            _cookies.remove("sce_rt")
+
+
+# ── RESTORE SUPABASE CLIENT SESSION ──────────────────────────────────────────
+# Even when tokens are in session_state, the Supabase client object
+# (module-level in db.py) loses its auth context on every rerun.
+# Re-attach it each time so DB calls go through as the authenticated user.
 
 if st.session_state["access_token"]:
     restore_session(
@@ -107,17 +164,22 @@ def render_auth_screen() -> None:
                 "Password", type="password", key="signin_password"
             )
 
-            if st.button(
-                "Sign in", type="primary", use_container_width=True, key="signin_btn"
-            ):
+            if st.button("Sign in", type="primary", use_container_width=True, key="signin_btn"):
                 if not email_in.strip() or not pass_in:
                     st.warning("Enter your email and password.")
                 else:
                     try:
                         response = sign_in(email_in.strip(), pass_in)
+
                         st.session_state["user"]          = response.user
                         st.session_state["access_token"]  = response.session.access_token
                         st.session_state["refresh_token"] = response.session.refresh_token
+
+                        # Persist tokens in browser cookies so page refresh
+                        # doesn't force a new login
+                        _cookies.set("sce_at", response.session.access_token)
+                        _cookies.set("sce_rt", response.session.refresh_token)
+
                         st.rerun()
                     except Exception as e:
                         st.error(f"Sign in failed — {e}")
@@ -131,10 +193,7 @@ def render_auth_screen() -> None:
                 help="Minimum 6 characters"
             )
 
-            if st.button(
-                "Create account", type="primary",
-                use_container_width=True, key="signup_btn"
-            ):
+            if st.button("Create account", type="primary", use_container_width=True, key="signup_btn"):
                 if not email_up.strip() or not pass_up:
                     st.warning("Enter your email and password.")
                 elif len(pass_up) < 6:
@@ -143,8 +202,8 @@ def render_auth_screen() -> None:
                     try:
                         sign_up(email_up.strip(), pass_up)
                         st.success(
-                            "Account created. Check your inbox to confirm your "
-                            "email, then sign in."
+                            "Account created. Check your inbox to confirm "
+                            "your email, then sign in."
                         )
                     except Exception as e:
                         st.error(f"Sign up failed — {e}")
@@ -158,19 +217,28 @@ def render_main_app() -> None:
     user    = st.session_state["user"]
     user_id = user.id
 
-    # ── Load preferences once per login session ───────────────────────────────
+    # ── Load from DB once per login session ───────────────────────────────────
+    # prefs_loaded is False after login or page refresh.
+    # After the first load it's True and this block never runs again,
+    # so there are zero DB calls on subsequent reruns from typing/interaction.
+
     if not st.session_state["prefs_loaded"]:
         prefs = load_preferences(user_id)
         if prefs:
-            st.session_state["offer"]   = prefs.get("offer_text", "") or ""
-            st.session_state["tone"]    = prefs.get("default_tone", "direct")
-            st.session_state["length"]  = prefs.get("default_length", "short (5-6 lines)")
-            st.session_state["is_paid"] = prefs.get("is_paid", False)
-        st.session_state["templates"]    = load_templates(user_id)
+            st.session_state["offer"]    = prefs.get("offer_text", "")     or ""
+            st.session_state["tone"]     = prefs.get("default_tone",   "direct")
+            st.session_state["length"]   = prefs.get("default_length", "short (5-6 lines)")
+            st.session_state["is_paid"]  = prefs.get("is_paid", False)
+
+        # Cache today's usage count once — only updated after successful generation
+        st.session_state["today_count"] = get_today_count(user_id)
+        st.session_state["templates"]   = load_templates(user_id)
         st.session_state["prefs_loaded"] = True
 
-    is_paid          = st.session_state["is_paid"]
-    at_limit, today_count = is_at_limit(user_id, is_paid)
+    # Read exclusively from session state from here — no DB calls on reruns
+    is_paid     = st.session_state["is_paid"]
+    today_count = st.session_state["today_count"]
+    at_limit    = (not is_paid) and (today_count >= FREE_TIER_LIMIT)
 
     # ── SIDEBAR ───────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -179,14 +247,15 @@ def render_main_app() -> None:
 
         if st.button("Sign out", use_container_width=True):
             sign_out()
+            # Remove persisted cookies so they don't auto-login on next visit
+            _cookies.remove("sce_at")
+            _cookies.remove("sce_rt")
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
 
         st.divider()
 
-        # Widgets read their value from st.session_state[key],
-        # which was pre-populated from the DB in load_preferences above.
         offer = st.text_area(
             "Your offer / product",
             placeholder=(
@@ -235,7 +304,7 @@ def render_main_app() -> None:
             if at_limit:
                 st.warning(
                     f"Daily limit of {FREE_TIER_LIMIT} emails reached. "
-                    "Contact us to upgrade."
+                    "Resets at midnight."
                 )
 
         # ── Template library ──────────────────────────────────────────────────
@@ -251,19 +320,18 @@ def render_main_app() -> None:
                             f"{tmpl.get('prospect_name', '')} · "
                             f"{tmpl['company_name']}"
                         )
-
                     if st.button("Load", key=f"load_{tmpl['id']}"):
                         st.session_state["result"] = {
-                            "hook":             tmpl.get("hook", ""),
-                            "email_body":       tmpl.get("email_body", ""),
-                            "followup_1":       tmpl.get("followup_1", ""),
-                            "followup_2":       tmpl.get("followup_2", ""),
-                            "subjects":         tmpl.get("subjects") or {
-                                                    "curiosity": "",
-                                                    "direct":    "",
-                                                    "question":  "",
-                                                },
-                            "elapsed_seconds":  None,
+                            "hook":            tmpl.get("hook", ""),
+                            "email_body":      tmpl.get("email_body", ""),
+                            "followup_1":      tmpl.get("followup_1", ""),
+                            "followup_2":      tmpl.get("followup_2", ""),
+                            "subjects":        tmpl.get("subjects") or {
+                                                   "curiosity": "",
+                                                   "direct":    "",
+                                                   "question":  "",
+                                               },
+                            "elapsed_seconds": None,
                         }
                         st.session_state["last_inputs"] = {
                             "company_name":   tmpl.get("company_name", ""),
@@ -280,7 +348,7 @@ def render_main_app() -> None:
         if st.session_state["result"]:
             st.divider()
             if st.button("Clear results", use_container_width=True):
-                st.session_state["result"] = None
+                st.session_state["result"]      = None
                 st.session_state["last_inputs"] = {}
                 st.rerun()
 
@@ -289,7 +357,6 @@ def render_main_app() -> None:
     st.caption("Paste a company URL — get a personalized cold email + follow-up sequence.")
     st.divider()
 
-    # ── INPUT FORM ────────────────────────────────────────────────────────────
     col_left, col_right = st.columns(2)
 
     with col_left:
@@ -308,7 +375,7 @@ def render_main_app() -> None:
             "Company website URL", placeholder="https://posthog.com", key="website_url"
         )
 
-    # ── VALIDATION ────────────────────────────────────────────────────────────
+    # ── Validation ────────────────────────────────────────────────────────────
     all_fields_filled = all([
         prospect_name.strip(),
         company_name.strip(),
@@ -322,11 +389,10 @@ def render_main_app() -> None:
     if not offer.strip():
         st.caption("⚠️ Add your offer in the sidebar first.")
     elif at_limit:
-        st.caption(f"⚠️ Daily limit of {FREE_TIER_LIMIT} emails reached.")
+        st.caption(f"⚠️ Daily limit of {FREE_TIER_LIMIT} emails reached. Resets at midnight.")
     elif not all_fields_filled:
         st.caption("Fill in all fields to generate.")
 
-    # ── GENERATE BUTTON ───────────────────────────────────────────────────────
     generate_btn = st.button(
         "Generate Email →", type="primary", disabled=not can_generate
     )
@@ -337,11 +403,11 @@ def render_main_app() -> None:
             url = "https://" + url
         return url
 
-    # ── PIPELINE CALL ─────────────────────────────────────────────────────────
+    # ── Pipeline ──────────────────────────────────────────────────────────────
     if generate_btn:
         st.session_state["result"] = None
 
-        with st.spinner("Researching prospect and generating email sequence… (20–30 seconds)"):
+        with st.spinner("Researching prospect and generating email sequence… (10–20 seconds)"):
             try:
                 result = generate_email_package(
                     prospect_name=prospect_name.strip(),
@@ -361,9 +427,14 @@ def render_main_app() -> None:
                     "followup_2_day": int(followup_2_day),
                 }
 
-                # Both fire silently — user never sees them
+                # Save preferences silently
                 save_preferences(user_id, offer.strip(), tone, length)
-                increment_usage(user_id)
+
+                # Increment usage using the cached count — no extra DB read
+                increment_usage(user_id, today_count)
+
+                # Update the cached count locally — no rerun needed, no DB read
+                st.session_state["today_count"] += 1
 
             except ValueError as e:
                 st.error(str(e))
@@ -371,7 +442,7 @@ def render_main_app() -> None:
                 st.error(f"Something went wrong: {e}")
                 logging.exception("Pipeline error")
 
-    # ── OUTPUT ────────────────────────────────────────────────────────────────
+    # ── Output ────────────────────────────────────────────────────────────────
     if st.session_state["result"]:
         result = st.session_state["result"]
         last   = st.session_state.get("last_inputs", {})
@@ -382,7 +453,6 @@ def render_main_app() -> None:
 
         st.divider()
 
-        # Hook + elapsed time
         hook_col, time_col = st.columns([5, 1])
         with hook_col:
             st.caption("PERSONALIZATION HOOK IDENTIFIED")
@@ -394,7 +464,6 @@ def render_main_app() -> None:
 
         st.divider()
 
-        # Subject lines
         st.subheader("Subject lines")
         sub_col1, sub_col2, sub_col3 = st.columns(3)
         subject_card(sub_col1, "CURIOSITY", result["subjects"]["curiosity"])
@@ -414,7 +483,6 @@ def render_main_app() -> None:
 
         st.divider()
 
-        # Email tabs
         tab1, tab2, tab3 = st.tabs([
             "Initial email",
             f"Follow-up · Day {f1_day}",
@@ -447,14 +515,13 @@ def render_main_app() -> None:
 
         with tab3:
             st.caption(
-                f"Still no reply at day {f2_day} — pattern interrupt, shorter, different approach."
+                f"Still no reply at day {f2_day} — pattern interrupt, different approach."
             )
             if result.get("followup_2"):
                 copyable_block("", result["followup_2"])
             else:
                 st.warning("Follow-up 2 not generated — regenerate the full email.")
 
-        # ── Template saving ───────────────────────────────────────────────────
         st.divider()
         with st.expander("💾 Save as template"):
             tmpl_name_input = st.text_input(
