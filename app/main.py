@@ -356,46 +356,39 @@ def render_main_app() -> None:
     st.markdown("## AI Cold Email & Sales Outreach Engine")
     st.caption("Paste a company URL — get a personalized cold email + follow-up sequence.")
     st.divider()
+# ── INPUT FORM ────────────────────────────────────────────────────────────
+    # st.form batches all widget events — no rerun until the submit button
+    # is clicked. This is what eliminates the gray overlay while typing.
 
-    col_left, col_right = st.columns(2)
+    with st.form("prospect_form"):
+        col_left, col_right = st.columns(2)
 
-    with col_left:
-        prospect_name = st.text_input(
-            "Prospect name", placeholder="James", key="prospect_name"
+        with col_left:
+            prospect_name = st.text_input(
+                "Prospect name", placeholder="James", key="prospect_name"
+            )
+            company_name = st.text_input(
+                "Company name", placeholder="PostHog", key="company_name"
+            )
+
+        with col_right:
+            role = st.text_input(
+                "Prospect role / title", placeholder="VP of Engineering", key="role"
+            )
+            website_url = st.text_input(
+                "Company website URL", placeholder="https://posthog.com", key="website_url"
+            )
+
+        # at_limit is safe to use here — it comes from session state, not a live DB call
+        generate_btn = st.form_submit_button(
+            "Generate Email →",
+            type="primary",
+            disabled=at_limit,
         )
-        company_name = st.text_input(
-            "Company name", placeholder="PostHog", key="company_name"
-        )
 
-    with col_right:
-        role = st.text_input(
-            "Prospect role / title", placeholder="VP of Engineering", key="role"
-        )
-        website_url = st.text_input(
-            "Company website URL", placeholder="https://posthog.com", key="website_url"
-        )
-
-    # ── Validation ────────────────────────────────────────────────────────────
-    all_fields_filled = all([
-        prospect_name.strip(),
-        company_name.strip(),
-        role.strip(),
-        website_url.strip(),
-        offer.strip(),
-    ])
-
-    can_generate = all_fields_filled and follow_up_days_valid and not at_limit
-
-    if not offer.strip():
-        st.caption("⚠️ Add your offer in the sidebar first.")
-    elif at_limit:
+    # Validation messages shown below the form after it renders
+    if at_limit:
         st.caption(f"⚠️ Daily limit of {FREE_TIER_LIMIT} emails reached. Resets at midnight.")
-    elif not all_fields_filled:
-        st.caption("Fill in all fields to generate.")
-
-    generate_btn = st.button(
-        "Generate Email →", type="primary", disabled=not can_generate
-    )
 
     def normalize_url(url: str) -> str:
         url = url.strip()
@@ -405,44 +398,52 @@ def render_main_app() -> None:
 
     # ── Pipeline ──────────────────────────────────────────────────────────────
     if generate_btn:
-        st.session_state["result"] = None
+        # Validate here — can't do it dynamically inside a form
+        if not offer.strip():
+            st.warning("⚠️ Add your offer in the sidebar before generating.")
+        elif not all([prospect_name.strip(), company_name.strip(), role.strip(), website_url.strip()]):
+            st.warning("⚠️ Fill in all four fields before generating.")
+        elif not follow_up_days_valid:
+            st.warning("⚠️ Fix follow-up day settings in the sidebar.")
+        else:
+            st.session_state["result"] = None
 
-        _generation_succeeded = False
+            _generation_succeeded = False
 
-        with st.spinner("Researching prospect and generating email sequence… (10–20 seconds)"):
-            try:
-                result = generate_email_package(
-                    prospect_name=prospect_name.strip(),
-                    company_name=company_name.strip(),
-                    website_url=normalize_url(website_url),
-                    role=role.strip(),
-                    offer=offer.strip(),
-                    tone=tone,
-                    length=length,
-                    followup_1_day=int(followup_1_day),
-                    followup_2_day=int(followup_2_day),
-                )
-                st.session_state["result"] = result
-                st.session_state["last_inputs"] = {
-                    "company_name":   company_name.strip(),
-                    "followup_1_day": int(followup_1_day),
-                    "followup_2_day": int(followup_2_day),
-                }
-                save_preferences(user_id, offer.strip(), tone, length)
-                increment_usage(user_id, today_count)
-                st.session_state["today_count"] += 1
-                _generation_succeeded = True
+            with st.spinner("Researching prospect and generating email sequence… (10–20 seconds)"):
+                try:
+                    result = generate_email_package(
+                        prospect_name=prospect_name.strip(),
+                        company_name=company_name.strip(),
+                        website_url=normalize_url(website_url),
+                        role=role.strip(),
+                        offer=offer.strip(),
+                        tone=tone,
+                        length=length,
+                        followup_1_day=int(followup_1_day),
+                        followup_2_day=int(followup_2_day),
+                    )
+                    st.session_state["result"] = result
+                    st.session_state["last_inputs"] = {
+                        "company_name":   company_name.strip(),
+                        "followup_1_day": int(followup_1_day),
+                        "followup_2_day": int(followup_2_day),
+                    }
+                    save_preferences(user_id, offer.strip(), tone, length)
+                    increment_usage(user_id, today_count)
+                    st.session_state["today_count"] += 1
+                    _generation_succeeded = True
 
-            except ValueError as e:
-                st.error(str(e))
-            except Exception as e:
-                st.error(f"Something went wrong: {e}")
-                logging.exception("Pipeline error")
+                except ValueError as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Something went wrong: {e}")
+                    logging.exception("Pipeline error")
 
-        # Outside both the spinner and the try-except so RerunException
-        # is not accidentally caught by the except Exception block above
-        if _generation_succeeded:
-            st.rerun()
+            # Outside both the spinner and the try-except so RerunException
+            # is not accidentally caught by the except Exception block above
+            if _generation_succeeded:
+                st.rerun()
 
     # ── Output ────────────────────────────────────────────────────────────────
     if st.session_state["result"]:
