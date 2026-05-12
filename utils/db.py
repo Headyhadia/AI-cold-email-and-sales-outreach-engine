@@ -31,14 +31,22 @@ def sign_out() -> None:
 
 
 def restore_session(access_token: str, refresh_token: str) -> None:
-    """
-    Re-attach a user session to the Supabase client on every Streamlit rerun.
-    Without this, the client is anonymous and RLS blocks every DB call.
-    """
     try:
         supabase.auth.set_session(access_token, refresh_token)
     except Exception as e:
-        logger.warning(f"Could not restore session: {e}")
+        logger.warning(f"restore_session failed: {e}")
+
+
+def get_user_from_token(access_token: str):
+    """
+    Validates the stored access token and returns the user object.
+    Returns None if the token is expired or invalid.
+    Used during cookie-based session restoration on page refresh.
+    """
+    try:
+        return supabase.auth.get_user(access_token)
+    except Exception:
+        return None
 
 
 # ── Preferences ───────────────────────────────────────────────────────────────
@@ -52,7 +60,10 @@ def load_preferences(user_id: str) -> dict:
             .maybe_single()
             .execute()
         )
-        return result.data or {}
+        # Guard result itself before accessing .data
+        if result is None or result.data is None:
+            return {}
+        return result.data
     except Exception as e:
         logger.warning(f"load_preferences failed: {e}")
         return {}
@@ -108,7 +119,9 @@ def load_templates(user_id: str) -> list:
             .order("created_at", desc=True)
             .execute()
         )
-        return result.data or []
+        if result is None or result.data is None:
+            return []
+        return result.data
     except Exception as e:
         logger.warning(f"load_templates failed: {e}")
         return []
@@ -133,30 +146,28 @@ def get_today_count(user_id: str) -> int:
             .maybe_single()
             .execute()
         )
-        return result.data.get("emails_generated", 0) if result.data else 0
+        # result itself can be None on first-ever call; result.data is None when no row exists
+        if result is None or result.data is None:
+            return 0
+        return result.data.get("emails_generated", 0)
     except Exception as e:
         logger.warning(f"get_today_count failed: {e}")
         return 0
 
 
-def increment_usage(user_id: str) -> None:
+def increment_usage(user_id: str, current_count: int) -> None:
+    """
+    Takes the already-known current_count to avoid a second DB read.
+    Caller is responsible for passing the cached value.
+    """
     try:
-        current = get_today_count(user_id)
         supabase.table("usage_log").upsert(
             {
                 "user_id":          user_id,
                 "log_date":         date.today().isoformat(),
-                "emails_generated": current + 1,
+                "emails_generated": current_count + 1,
             },
             on_conflict="user_id,log_date",
         ).execute()
     except Exception as e:
         logger.warning(f"increment_usage failed: {e}")
-
-
-def is_at_limit(user_id: str, is_paid: bool) -> tuple[bool, int]:
-    """Returns (at_limit, today_count). Paid users are never at limit."""
-    if is_paid:
-        return False, 0
-    count = get_today_count(user_id)
-    return count >= FREE_TIER_LIMIT, count
