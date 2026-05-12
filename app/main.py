@@ -407,6 +407,8 @@ def render_main_app() -> None:
     if generate_btn:
         st.session_state["result"] = None
 
+        _generation_succeeded = False
+
         with st.spinner("Researching prospect and generating email sequence… (10–20 seconds)"):
             try:
                 result = generate_email_package(
@@ -426,21 +428,21 @@ def render_main_app() -> None:
                     "followup_1_day": int(followup_1_day),
                     "followup_2_day": int(followup_2_day),
                 }
-
-                # Save preferences silently
                 save_preferences(user_id, offer.strip(), tone, length)
-
-                # Increment usage using the cached count — no extra DB read
                 increment_usage(user_id, today_count)
-
-                # Update the cached count locally — no rerun needed, no DB read
                 st.session_state["today_count"] += 1
+                _generation_succeeded = True
 
             except ValueError as e:
                 st.error(str(e))
             except Exception as e:
                 st.error(f"Something went wrong: {e}")
                 logging.exception("Pipeline error")
+
+        # Outside both the spinner and the try-except so RerunException
+        # is not accidentally caught by the except Exception block above
+        if _generation_succeeded:
+            st.rerun()
 
     # ── Output ────────────────────────────────────────────────────────────────
     if st.session_state["result"]:
