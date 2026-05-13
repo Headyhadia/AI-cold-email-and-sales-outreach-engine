@@ -410,7 +410,7 @@ def render_main_app() -> None:
 
             _generation_succeeded = False
 
-            with st.spinner("Researching prospect and generating email sequence… (10–20 seconds)"):
+            with st.spinner("Researching prospect and generating email sequence… (20–30 seconds)"):
                 try:
                     result = generate_email_package(
                         prospect_name=prospect_name.strip(),
